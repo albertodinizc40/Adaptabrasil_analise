@@ -1,0 +1,1 @@
+# Adaptabrasil_analise
