@@ -6,6 +6,22 @@ st.set_page_config(page_title="AdaptaBrasil", layout="wide")
 ARQUIVO = "tabela_adapta_brasi.xlsx"
 ABA = "General_Data_Base"
 
+
+def normalizar_id(valor):
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).strip()
+    if texto.lower() == "nan":
+        return ""
+    try:
+        num = float(texto)
+        if num.is_integer():
+            return str(int(num))
+        return str(num)
+    except:
+        return texto
+
+
 @st.cache_data
 def carregar_dados():
     df = pd.read_excel(ARQUIVO, sheet_name=ABA)
@@ -14,105 +30,128 @@ def carregar_dados():
         if df[col].dtype == "object":
             df[col] = df[col].fillna("").astype(str)
 
-    for col in ["indicator_id", "parent_id"]:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
+    if "indicator_id" in df.columns:
+        df["indicator_id"] = df["indicator_id"].apply(normalizar_id)
+
+    if "parent_id" in df.columns:
+        df["parent_id"] = df["parent_id"].apply(normalizar_id)
 
     if "level_num" in df.columns:
         df["level_num"] = pd.to_numeric(df["level_num"], errors="coerce")
 
     return df
 
-def buscar_descendentes(df, indicador_raiz):
-    filhos_mapa = df.groupby("parent_id")["indicator_id"].apply(list).to_dict()
 
-    descendentes = []
-    fila = [str(indicador_raiz)]
+def buscar_descendentes(df, id_raiz):
+    id_raiz = normalizar_id(id_raiz)
+
+    mapa_filhos = (
+        df.groupby("parent_id")["indicator_id"]
+        .apply(list)
+        .to_dict()
+    )
+
+    visitados = set()
+    fila = [id_raiz]
 
     while fila:
         atual = fila.pop(0)
-        filhos = filhos_mapa.get(atual, [])
+        filhos = mapa_filhos.get(atual, [])
         for filho in filhos:
-            if filho not in descendentes:
-                descendentes.append(filho)
+            filho = normalizar_id(filho)
+            if filho and filho not in visitados:
+                visitados.add(filho)
                 fila.append(filho)
 
-    return descendentes
+    return visitados
+
 
 df = carregar_dados()
 
 st.title("AdaptaBrasil - Explorador de Indicadores")
-st.write("Selecione um nível e um indicador. O painel exibirá todos os indicadores que estão abaixo dele na hierarquia.")
-
-if "level_num" not in df.columns:
-    st.error("A coluna level_num não foi encontrada.")
-    st.stop()
-
-if "title" not in df.columns:
-    st.error("A coluna title não foi encontrada.")
-    st.stop()
+st.write("A tabela abaixo começa com todos os indicadores. Os filtros apenas refinam a visualização.")
 
 if "indicator_id" not in df.columns or "parent_id" not in df.columns:
     st.error("As colunas indicator_id e parent_id são obrigatórias.")
     st.stop()
 
-col_filtro1, col_filtro2 = st.columns([1, 3])
+df_visual = df.copy()
 
-with col_filtro1:
-    niveis_disponiveis = sorted([int(x) for x in df["level_num"].dropna().unique().tolist()])
-    nivel_escolhido = st.selectbox("Selecione o level", niveis_disponiveis)
+col1, col2, col3 = st.columns([1, 2, 2])
 
-df_nivel = df[df["level_num"] == nivel_escolhido].copy()
-df_nivel = df_nivel.sort_values("title")
+with col1:
+    niveis = sorted([int(x) for x in df["level_num"].dropna().unique().tolist()]) if "level_num" in df.columns else []
+    filtro_level = st.selectbox("Filtrar por level", ["Todos"] + niveis)
 
-with col_filtro2:
-    opcoes = df_nivel[["indicator_id", "title"]].drop_duplicates().copy()
-    opcoes["label"] = opcoes["title"] + " | ID " + opcoes["indicator_id"]
-    indicador_label = st.selectbox("Selecione o indicador pelo title", opcoes["label"].tolist())
+with col2:
+    opcoes_titles = (
+        df[["indicator_id", "title", "level_num"]]
+        .dropna(subset=["title"])
+        .drop_duplicates()
+        .copy()
+    )
 
-indicador_id_selecionado = opcoes.loc[opcoes["label"] == indicador_label, "indicator_id"].iloc[0]
+    if "level_num" in opcoes_titles.columns:
+        opcoes_titles["label"] = opcoes_titles["title"].astype(str) + " | level " + opcoes_titles["level_num"].fillna(-1).astype(int).astype(str) + " | ID " + opcoes_titles["indicator_id"]
+    else:
+        opcoes_titles["label"] = opcoes_titles["title"].astype(str) + " | ID " + opcoes_titles["indicator_id"]
 
-linha_selecionada = df[df["indicator_id"] == indicador_id_selecionado].head(1)
+    filtro_indicador = st.selectbox(
+        "Filtrar pela hierarquia de um indicador",
+        ["Todos"] + sorted(opcoes_titles["label"].tolist())
+    )
 
-descendentes = buscar_descendentes(df, indicador_id_selecionado)
-ids_filtrados = [indicador_id_selecionado] + descendentes
+with col3:
+    busca = st.text_input("Buscar por título ou descrição")
 
-df_filtrado = df[df["indicator_id"].isin(ids_filtrados)].copy()
-df_filtrado = df_filtrado.sort_values(["level_num", "title"])
+if filtro_level != "Todos":
+    df_visual = df_visual[df_visual["level_num"] == int(filtro_level)].copy()
+
+detalhe_item = None
+
+if filtro_indicador != "Todos":
+    linha_sel = opcoes_titles[opcoes_titles["label"] == filtro_indicador].head(1)
+    if not linha_sel.empty:
+        id_pai = normalizar_id(linha_sel.iloc[0]["indicator_id"])
+        ids_desc = buscar_descendentes(df, id_pai)
+        ids_filtrar = {id_pai} | ids_desc
+        df_visual = df_visual[df_visual["indicator_id"].isin(ids_filtrar)].copy()
+        detalhe_item = df[df["indicator_id"] == id_pai].head(1)
+
+if busca.strip():
+    termo = busca.lower().strip()
+    mascara = pd.Series(False, index=df_visual.index)
+
+    for col in ["title", "indicator_name", "shortname", "simple_description", "complete_description", "sep_description"]:
+        if col in df_visual.columns:
+            mascara = mascara | df_visual[col].astype(str).str.lower().str.contains(termo, na=False)
+
+    df_visual = df_visual[mascara].copy()
 
 st.subheader("Visão geral")
 
 c1, c2, c3, c4 = st.columns(4)
+c1.metric("Indicadores visíveis", len(df_visual))
+c2.metric("IDs únicos", df_visual["indicator_id"].nunique() if "indicator_id" in df_visual.columns else 0)
+c3.metric("Levels visíveis", df_visual["level_num"].nunique() if "level_num" in df_visual.columns else 0)
+c4.metric("Itens com parent_id", int((df_visual["parent_id"].astype(str).str.strip() != "").sum()) if "parent_id" in df_visual.columns else 0)
 
-with c1:
-    st.metric("Total de indicadores", len(df_filtrado))
+if detalhe_item is not None and not detalhe_item.empty:
+    item = detalhe_item.iloc[0]
 
-with c2:
-    st.metric("Níveis envolvidos", df_filtrado["level_num"].nunique())
+    st.divider()
+    st.subheader("Detalhes do indicador selecionado")
 
-with c3:
-    st.metric("Menor level", int(df_filtrado["level_num"].min()) if len(df_filtrado) > 0 else 0)
+    a, b = st.columns(2)
 
-with c4:
-    st.metric("Maior level", int(df_filtrado["level_num"].max()) if len(df_filtrado) > 0 else 0)
-
-st.divider()
-
-st.subheader("Detalhes do indicador selecionado")
-
-if not linha_selecionada.empty:
-    item = linha_selecionada.iloc[0]
-
-    info1, info2 = st.columns(2)
-
-    with info1:
+    with a:
         st.write(f"Title: {item.get('title', '')}")
         st.write(f"Indicator ID: {item.get('indicator_id', '')}")
         st.write(f"Parent ID: {item.get('parent_id', '')}")
         st.write(f"Level: {item.get('level_num', '')}")
         st.write(f"Shortname: {item.get('shortname', '')}")
 
-    with info2:
+    with b:
         st.write(f"Indicator name: {item.get('indicator_name', '')}")
         st.write(f"Climate hazard: {item.get('climate_hazard', '')}")
         st.write(f"Measurement unit: {item.get('measurement_unit', '')}")
@@ -130,20 +169,7 @@ if not linha_selecionada.empty:
         st.info(str(item.get("sep_description", "")))
 
 st.divider()
-
-st.subheader("Tabela com todos os indicadores abaixo do item selecionado")
-
-busca = st.text_input("Buscar dentro da tabela filtrada")
-
-if busca.strip():
-    termo = busca.lower().strip()
-    mascara = pd.Series(False, index=df_filtrado.index)
-
-    for col in ["title", "indicator_name", "shortname", "simple_description", "complete_description", "sep_description"]:
-        if col in df_filtrado.columns:
-            mascara = mascara | df_filtrado[col].astype(str).str.lower().str.contains(termo, na=False)
-
-    df_filtrado = df_filtrado[mascara].copy()
+st.subheader("Tabela com todos os indicadores")
 
 colunas_exibir = [
     "indicator_id",
@@ -161,23 +187,22 @@ colunas_exibir = [
     "schema"
 ]
 
-colunas_exibir = [c for c in colunas_exibir if c in df_filtrado.columns]
+colunas_exibir = [c for c in colunas_exibir if c in df_visual.columns]
 
 st.dataframe(
-    df_filtrado[colunas_exibir],
+    df_visual[colunas_exibir].sort_values(["level_num", "title"], na_position="last"),
     use_container_width=True,
     hide_index=True
 )
 
 st.divider()
+st.subheader("Resumo por level")
 
-st.subheader("Resumo por level dos indicadores filtrados")
-
-resumo = (
-    df_filtrado.groupby("level_num")
-    .size()
-    .reset_index(name="quantidade")
-    .sort_values("level_num")
-)
-
-st.dataframe(resumo, use_container_width=True, hide_index=True)
+if "level_num" in df_visual.columns:
+    resumo = (
+        df_visual.groupby("level_num")
+        .size()
+        .reset_index(name="quantidade")
+        .sort_values("level_num")
+    )
+    st.dataframe(resumo, use_container_width=True, hide_index=True)
