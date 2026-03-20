@@ -14,212 +14,170 @@ def carregar_dados():
         if df[col].dtype == "object":
             df[col] = df[col].fillna("").astype(str)
 
-    if "indicator_id" in df.columns:
-        df["indicator_id"] = df["indicator_id"].astype(str)
+    for col in ["indicator_id", "parent_id"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
 
-    if "parent_id" in df.columns:
-        df["parent_id"] = df["parent_id"].astype(str)
+    if "level_num" in df.columns:
+        df["level_num"] = pd.to_numeric(df["level_num"], errors="coerce")
 
-    if "menu_structure" not in df.columns:
-        df["menu_structure"] = ""
+    return df
 
-    def limpar_menu(x):
-        x = str(x).strip()
-        if x.lower() == "nan":
-            return ""
-        return x
+def buscar_descendentes(df, indicador_raiz):
+    filhos_mapa = df.groupby("parent_id")["indicator_id"].apply(list).to_dict()
 
-    df["menu_structure"] = df["menu_structure"].apply(limpar_menu)
+    descendentes = []
+    fila = [str(indicador_raiz)]
 
-    separadores = [" > ", ">", " / ", "/", " | ", "|", " - "]
+    while fila:
+        atual = fila.pop(0)
+        filhos = filhos_mapa.get(atual, [])
+        for filho in filhos:
+            if filho not in descendentes:
+                descendentes.append(filho)
+                fila.append(filho)
 
-    def split_hierarquia(texto):
-        partes = [texto]
-        for sep in separadores:
-            if sep in texto:
-                partes = [p.strip() for p in texto.split(sep) if str(p).strip()]
-                break
-        return partes
+    return descendentes
 
-    df["hierarquia_partes"] = df["menu_structure"].apply(split_hierarquia)
-
-    max_niveis = max(df["hierarquia_partes"].apply(len).max(), 1)
-
-    for i in range(max_niveis):
-        df[f"nivel_{i+1}"] = df["hierarquia_partes"].apply(
-            lambda x: x[i] if len(x) > i else ""
-        )
-
-    return df, max_niveis
-
-df, max_niveis = carregar_dados()
+df = carregar_dados()
 
 st.title("AdaptaBrasil - Explorador de Indicadores")
-st.write("Explore a hierarquia dos indicadores, filtre por nível e veja os detalhes completos.")
+st.write("Selecione um nível e um indicador. O painel exibirá todos os indicadores que estão abaixo dele na hierarquia.")
 
-with st.sidebar:
-    st.header("Filtros da hierarquia")
+if "level_num" not in df.columns:
+    st.error("A coluna level_num não foi encontrada.")
+    st.stop()
 
-    df_filtrado = df.copy()
+if "title" not in df.columns:
+    st.error("A coluna title não foi encontrada.")
+    st.stop()
 
-    filtros_escolhidos = {}
+if "indicator_id" not in df.columns or "parent_id" not in df.columns:
+    st.error("As colunas indicator_id e parent_id são obrigatórias.")
+    st.stop()
 
-    for i in range(1, max_niveis + 1):
-        col_nivel = f"nivel_{i}"
+col_filtro1, col_filtro2 = st.columns([1, 3])
 
-        opcoes = sorted([x for x in df_filtrado[col_nivel].unique().tolist() if str(x).strip() != ""])
-        opcoes = ["Todos"] + opcoes
+with col_filtro1:
+    niveis_disponiveis = sorted([int(x) for x in df["level_num"].dropna().unique().tolist()])
+    nivel_escolhido = st.selectbox("Selecione o level", niveis_disponiveis)
 
-        escolha = st.selectbox(f"Nível {i}", opcoes, key=f"filtro_nivel_{i}")
-        filtros_escolhidos[col_nivel] = escolha
+df_nivel = df[df["level_num"] == nivel_escolhido].copy()
+df_nivel = df_nivel.sort_values("title")
 
-        if escolha != "Todos":
-            df_filtrado = df_filtrado[df_filtrado[col_nivel] == escolha].copy()
+with col_filtro2:
+    opcoes = df_nivel[["indicator_id", "title"]].drop_duplicates().copy()
+    opcoes["label"] = opcoes["title"] + " | ID " + opcoes["indicator_id"]
+    indicador_label = st.selectbox("Selecione o indicador pelo title", opcoes["label"].tolist())
+
+indicador_id_selecionado = opcoes.loc[opcoes["label"] == indicador_label, "indicator_id"].iloc[0]
+
+linha_selecionada = df[df["indicator_id"] == indicador_id_selecionado].head(1)
+
+descendentes = buscar_descendentes(df, indicador_id_selecionado)
+ids_filtrados = [indicador_id_selecionado] + descendentes
+
+df_filtrado = df[df["indicator_id"].isin(ids_filtrados)].copy()
+df_filtrado = df_filtrado.sort_values(["level_num", "title"])
 
 st.subheader("Visão geral")
 
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
-    st.metric("Indicadores filtrados", len(df_filtrado))
+    st.metric("Total de indicadores", len(df_filtrado))
 
 with c2:
-    if "indicator_id" in df_filtrado.columns:
-        st.metric("IDs únicos", df_filtrado["indicator_id"].nunique())
-    else:
-        st.metric("IDs únicos", 0)
+    st.metric("Níveis envolvidos", df_filtrado["level_num"].nunique())
 
 with c3:
-    if "level_num" in df_filtrado.columns:
-        st.metric("Profundidade máxima", int(pd.to_numeric(df_filtrado["level_num"], errors="coerce").max() or 0))
-    else:
-        st.metric("Profundidade máxima", 0)
+    st.metric("Menor level", int(df_filtrado["level_num"].min()) if len(df_filtrado) > 0 else 0)
 
 with c4:
-    if "parent_id" in df_filtrado.columns:
-        qtd_com_pai = (df_filtrado["parent_id"].astype(str).str.strip() != "").sum()
-        st.metric("Itens com parent_id", int(qtd_com_pai))
-    else:
-        st.metric("Itens com parent_id", 0)
+    st.metric("Maior level", int(df_filtrado["level_num"].max()) if len(df_filtrado) > 0 else 0)
 
 st.divider()
 
-st.subheader("Distribuição por nível")
+st.subheader("Detalhes do indicador selecionado")
 
-colunas_niveis = [f"nivel_{i}" for i in range(1, max_niveis + 1)]
-aba1, aba2 = st.tabs(["Tabela hierárquica", "Resumo por nível"])
+if not linha_selecionada.empty:
+    item = linha_selecionada.iloc[0]
 
-with aba1:
-    colunas_tabela_hierarquia = [c for c in colunas_niveis if c in df_filtrado.columns]
-    colunas_tabela_hierarquia += [c for c in ["indicator_id", "title", "shortname", "level", "level_num", "parent_id"] if c in df_filtrado.columns]
+    info1, info2 = st.columns(2)
 
-    st.dataframe(
-        df_filtrado[colunas_tabela_hierarquia],
-        use_container_width=True,
-        hide_index=True
-    )
+    with info1:
+        st.write(f"Title: {item.get('title', '')}")
+        st.write(f"Indicator ID: {item.get('indicator_id', '')}")
+        st.write(f"Parent ID: {item.get('parent_id', '')}")
+        st.write(f"Level: {item.get('level_num', '')}")
+        st.write(f"Shortname: {item.get('shortname', '')}")
 
-with aba2:
-    for col_nivel in colunas_niveis:
-        if col_nivel in df_filtrado.columns:
-            resumo = (
-                df_filtrado[df_filtrado[col_nivel].astype(str).str.strip() != ""]
-                .groupby(col_nivel, dropna=False)
-                .size()
-                .reset_index(name="quantidade")
-                .sort_values("quantidade", ascending=False)
-            )
-            st.write(f"Resumo de {col_nivel}")
-            st.dataframe(resumo, use_container_width=True, hide_index=True)
+    with info2:
+        st.write(f"Indicator name: {item.get('indicator_name', '')}")
+        st.write(f"Climate hazard: {item.get('climate_hazard', '')}")
+        st.write(f"Measurement unit: {item.get('measurement_unit', '')}")
+        st.write(f"Disturbance: {item.get('disturbance', '')}")
+        st.write(f"Schema: {item.get('schema', '')}")
+
+    st.write("Simple description")
+    st.info(str(item.get("simple_description", "")))
+
+    st.write("Complete description")
+    st.info(str(item.get("complete_description", "")))
+
+    if "sep_description" in df.columns:
+        st.write("SEP description")
+        st.info(str(item.get("sep_description", "")))
 
 st.divider()
 
-st.subheader("Detalhes dos indicadores")
+st.subheader("Tabela com todos os indicadores abaixo do item selecionado")
 
-colunas_detalhes = [
+busca = st.text_input("Buscar dentro da tabela filtrada")
+
+if busca.strip():
+    termo = busca.lower().strip()
+    mascara = pd.Series(False, index=df_filtrado.index)
+
+    for col in ["title", "indicator_name", "shortname", "simple_description", "complete_description", "sep_description"]:
+        if col in df_filtrado.columns:
+            mascara = mascara | df_filtrado[col].astype(str).str.lower().str.contains(termo, na=False)
+
+    df_filtrado = df_filtrado[mascara].copy()
+
+colunas_exibir = [
     "indicator_id",
+    "parent_id",
+    "level_num",
+    "indicator_name",
     "title",
     "shortname",
     "simple_description",
     "complete_description",
     "sep_description",
-    "equation",
-    "years",
-    "years_description",
-    "scenarios",
-    "measurement_unit",
     "climate_hazard",
+    "measurement_unit",
     "disturbance",
-    "geometrytype",
-    "legend",
-    "schema",
-    "imageurl",
-    "level",
-    "level_num",
-    "parent_id"
+    "schema"
 ]
 
-colunas_detalhes = [c for c in colunas_detalhes if c in df_filtrado.columns]
-
-busca = st.text_input("Buscar por título, shortname ou descrição")
-
-if busca.strip():
-    busca_lower = busca.lower().strip()
-
-    mascara = pd.Series(False, index=df_filtrado.index)
-
-    for col in ["title", "shortname", "simple_description", "complete_description", "sep_description"]:
-        if col in df_filtrado.columns:
-            mascara = mascara | df_filtrado[col].astype(str).str.lower().str.contains(busca_lower, na=False)
-
-    df_detalhes = df_filtrado[mascara].copy()
-else:
-    df_detalhes = df_filtrado.copy()
+colunas_exibir = [c for c in colunas_exibir if c in df_filtrado.columns]
 
 st.dataframe(
-    df_detalhes[colunas_detalhes],
+    df_filtrado[colunas_exibir],
     use_container_width=True,
     hide_index=True
 )
 
 st.divider()
 
-st.subheader("Ficha resumida")
+st.subheader("Resumo por level dos indicadores filtrados")
 
-if len(df_detalhes) > 0:
-    opcoes_indicador = (
-        df_detalhes[["indicator_id", "title"]]
-        .fillna("")
-        .astype(str)
-        .drop_duplicates()
-    )
-    opcoes_indicador["label"] = opcoes_indicador["indicator_id"] + " - " + opcoes_indicador["title"]
+resumo = (
+    df_filtrado.groupby("level_num")
+    .size()
+    .reset_index(name="quantidade")
+    .sort_values("level_num")
+)
 
-    indicador_escolhido = st.selectbox(
-        "Selecione um indicador para ver os detalhes",
-        opcoes_indicador["label"].tolist()
-    )
-
-    id_escolhido = indicador_escolhido.split(" - ")[0]
-    detalhe = df_detalhes[df_detalhes["indicator_id"].astype(str) == id_escolhido].head(1)
-
-    if not detalhe.empty:
-        linha = detalhe.iloc[0]
-
-        st.write(f"ID: {linha.get('indicator_id', '')}")
-        st.write(f"Título: {linha.get('title', '')}")
-        st.write(f"Shortname: {linha.get('shortname', '')}")
-        st.write(f"Nível textual: {linha.get('level', '')}")
-        st.write(f"Nível numérico: {linha.get('level_num', '')}")
-        st.write(f"Parent ID: {linha.get('parent_id', '')}")
-
-        st.write("Simple description")
-        st.info(str(linha.get("simple_description", "")))
-
-        st.write("Complete description")
-        st.info(str(linha.get("complete_description", "")))
-
-        st.write("SEP description")
-        st.info(str(linha.get("sep_description", "")))
-else:
-    st.warning("Nenhum indicador encontrado com os filtros aplicados.")
+st.dataframe(resumo, use_container_width=True, hide_index=True)
